@@ -15,21 +15,23 @@ module SolidCache
       end
 
       def read(key)
-        select_all_no_query_cache(get_sql, to_binary(key)).first
+        result = select_all_no_query_cache(get_sql, lookup_value(key)).first
+        result[1] if result&.first == key
       end
 
       def read_multi(keys)
-        serialized_keys = keys.map { |key| to_binary(key) }
-        select_all_no_query_cache(get_all_sql(serialized_keys), serialized_keys).to_h
+        key_hashes = keys.map { |key| lookup_value(key) }
+        results = select_all_no_query_cache(get_all_sql(key_hashes), key_hashes).to_h
+        results.except!(results.keys - keys)
       end
 
       def delete_by_key(key)
-        delete_no_query_cache(:key, to_binary(key))
+        delete_no_query_cache(lookup_column, lookup_value(key))
       end
 
       def delete_multi(keys)
-        serialized_keys = keys.map { |key| to_binary(key) }
-        delete_no_query_cache(:key, serialized_keys)
+        serialized_keys = keys.map { |key| lookup_value(key) }
+        delete_no_query_cache(lookup_column, serialized_keys)
       end
 
       def clear_truncate
@@ -43,7 +45,8 @@ module SolidCache
       def increment(key, amount)
         transaction do
           uncached do
-            amount += lock.where(key: key).pick(:value).to_i
+            result = lock.where(lookup_column => lookup_value(key)).pick(:key, :value)
+            amount += result[1].to_i if result&.first == key
             write(key, amount)
             amount
           end
@@ -67,15 +70,56 @@ module SolidCache
       end
 
       private
-        def upsert_all_no_query_cache(attributes)
-          insert_all = ActiveRecord::InsertAll.new(self, attributes, unique_by: upsert_unique_by, on_duplicate: :update, update_only: [ :value ])
+        def upsert_all_no_query_cache(payloads)
+          insert_all = ActiveRecord::InsertAll.new(self, add_key_hash_and_byte_size(payloads), unique_by: upsert_unique_by, on_duplicate: :update, update_only: [ :value ])
           sql = connection.build_insert_sql(ActiveRecord::InsertAll::Builder.new(insert_all))
 
           message = +"#{self} "
-          message << "Bulk " if attributes.many?
+          message << "Bulk " if payloads.many?
           message << "Upsert"
           # exec_query_method does not clear the query cache, exec_insert_all does
           connection.send exec_query_method, sql, message
+        end
+
+        def add_key_hash_and_byte_size(payloads)
+          payloads.map do |payload|
+            payload.dup.tap do |payload|
+              if key_hash?
+                payload[:key_hash] = key_hash_for(payload[:key])
+                payload[:byte_size] = payload[:value].to_s.bytesize
+              end
+            end
+          end
+        end
+
+        def key_hash?
+          @key_hash ||= {}
+          if @key_hash.key?(connection.object_id)
+            @key_hash[connection.object_id]
+          else
+            @key_hash[connection.object_id] = connection.column_exists?(table_name, :key_hash)
+          end
+        end
+
+        def key_hash_indexed?
+          @key_hash_indexed ||= {}
+          if @key_hash_indexed.key?(connection.object_id)
+            @key_hash_indexed[connection.object_id]
+          else
+            @key_hash_indexed[connection.object_id] = connection.index_exists?(table_name, :key_hash)
+          end
+        end
+
+        def lookup_column
+          key_hash_indexed? ? :key_hash : :key
+        end
+
+        def lookup_value(key)
+          key_hash_indexed? ? key_hash_for(key) : to_binary(key)
+        end
+
+        def lookup_placeholder
+          key_hash_indexed? ? 1 : "placeholder"
         end
 
         def exec_query_method
@@ -83,19 +127,21 @@ module SolidCache
         end
 
         def upsert_unique_by
-          connection.supports_insert_conflict_target? ? :key : nil
+          connection.supports_insert_conflict_target? ? lookup_column : nil
         end
 
         def get_sql
-          @get_sql ||= build_sql(where(key: "placeholder").select(:value))
+          @get_sql ||= {}
+          @get_sql[lookup_column] ||= build_sql(where(lookup_column => lookup_placeholder).select(:key, :value))
         end
 
-        def get_all_sql(keys)
+        def get_all_sql(key_hashes)
           if connection.prepared_statements?
             @get_all_sql_binds ||= {}
-            @get_all_sql_binds[keys.count] ||= build_sql(where(key: keys).select(:key, :value))
+            @get_all_sql_binds[[key_hashes.count, lookup_column]] ||= build_sql(where(lookup_column => key_hashes).select(:key, :value))
           else
-            @get_all_sql_no_binds ||= build_sql(where(key: [ "placeholder1", "placeholder2" ]).select(:key, :value)).gsub("?, ?", "?")
+            @get_all_sql_no_binds ||= {}
+            @get_all_sql_no_binds[lookup_column] ||= build_sql(where(lookup_column => [ lookup_placeholder, lookup_placeholder ]).select(:key, :value)).gsub("?, ?", "?")
           end
         end
 
@@ -161,6 +207,11 @@ module SolidCache
 
             candidate_ids.sample(count)
           end
+        end
+
+        def key_hash_for(key)
+          # Need to unpack this as a signed integer - Postgresql and SQLite don't support unsigned integers
+          Digest::SHA256.digest(key).unpack("q>").first
         end
     end
   end
