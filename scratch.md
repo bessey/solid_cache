@@ -11,23 +11,21 @@ ID:  1     2      3     4     5
 
 The algorithm progresses from tail to head, before resetting back to the tail when it runs out of newer entries.
 
+The algorithm needs to store state across runs; a pointer to a record in the cache table. We achieve this by storing
+that as an Entry which will never expire or be evicted.
+
 ## The SIEVE algorithm in SolidCache
 
 ```ruby
 
+POINTER_KEY = "rails:sieve-eviction-pointer"
+
 Entry.transaction do
-  start = Entry.where(eviction_pointer: true).lock.first
+  pointer = Entry.find_by!(key: POINTER_KEY)
+  start = Entry.find_by(id: pointer.value) || Entry.order(:id).first
   count_to_evict = 100
 
-  if start
-    # Clear pointer, it will be set on the next entry later
-    start.update(eviction_pointer: false)
-  else
-    # First ever eviction fallback
-    start = Entry.order(:id).first
-  end
-
-  evictions = Entry.where(visited: false, id: start.id..).order(:id).first(count_to_evict)
+  evictions = eviction_scope(pointer.id).where(id: start.id..).first(count_to_evict)
 
   if evictions.any?
     clear_visited_status(start.id..evictions.last.id)
@@ -37,24 +35,27 @@ Entry.transaction do
     clear_visited_status(start.id..)
 
     # Now, we will definitely find unvisited Entrys, since we just set a bunch to unvisited
-    evictions = Entry.where(visited: false).order(:id).first(count_to_evict)
+    evictions = eviction_scope(pointer.id).first(count_to_evict)
     # Again, mark all passed over visited Entrys as unvisited
     clear_visited_status(..evictions.last.id)
   end
 
   # Set the pointer to the first Entry we have not processed yet
-  Entry.where(id: evictions.last.id..).limit(1).order(:id).update_all(eviction_pointer: true)
+  pointer.update(value: Entry.where(id: evictions.last.id..).order(:id).first.id)
 
   # Evict our found candidates!
   evictions.delete_all
 end
 
+def eviction_scope(pointer_id)
+  # Ensure the pointer is never considered for eviction as its a special cache entry we rely on
+  Entry.where(visited: false).where.not(id: pointer_id).order(:id)
+end
 
 def clear_visited_status(id_range)
   Entry.where(visited: true, id: id_range).update_all(visited: false)
 end
 ```
-
 
 ## When to trigger the expiration algorithm
 
@@ -85,11 +86,3 @@ but a lock prevents it, it can only mean a couple of things:
 1. Another cache reader is marking it as `visited`, meaning we have nothing to do
 2. An eviction cycle is passing over this entry, which means it is unlikely to be considered for eviction again for some
    time, reducing the impact of us failing to mark it as `visited`
-
-## Ideas
-
-Only one row in the entries table can be `eviction_pointer = true`, so this state should probably be stored as a foreign
-key, rather than a boolean on all rows which needs to be indexed despite us only ever caring about one row (at least for
-MySQL without partial indexes).
-
-I suppose we could store this pointer in the cache entries table itself, and special case it to never be expired.
