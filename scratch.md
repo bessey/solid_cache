@@ -25,26 +25,26 @@ Entry.transaction do
   start = Entry.find_by(id: pointer.value) || Entry.order(:id).first
   count_to_evict = 100
 
-  evictions = eviction_scope(pointer.id).where(id: start.id..).first(count_to_evict)
+  evictions = eviction_scope(pointer.id).where(id: start.id..).limit(count_to_evict).pluck(:id)
 
   if evictions.any?
-    clear_visited_status(start.id..evictions.last.id)
+    clear_visited_status(start.id..evictions.last)
   else
     # All newer Entry records were visited, so we need to start again from the very oldest
     # Before we do that, mark all passed over visited Entrys as unvisited
     clear_visited_status(start.id..)
 
     # Now, we will definitely find unvisited Entrys, since we just set a bunch to unvisited
-    evictions = eviction_scope(pointer.id).first(count_to_evict)
+    evictions = eviction_scope(pointer.id).limit(count_to_evict).pluck(:id)
     # Again, mark all passed over visited Entrys as unvisited
-    clear_visited_status(..evictions.last.id)
+    clear_visited_status(..evictions.last)
   end
 
   # Set the pointer to the first Entry we have not processed yet
-  pointer.update(value: Entry.where(id: evictions.last.id..).order(:id).first.id)
+  pointer.update(value: Entry.where(id: evictions.last..).order(:id).first.id)
 
   # Evict our found candidates!
-  evictions.delete_all
+  Entry.where(id: evictions).delete_all
 end
 
 def eviction_scope(pointer_id)
