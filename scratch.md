@@ -23,6 +23,10 @@ POINTER_KEY = "rails:sieve-eviction-pointer"
 Entry.transaction do
   pointer = Entry.find_by!(key: POINTER_KEY)
   start = Entry.find_by(id: pointer.value) || Entry.order(:id).first
+
+  # Not sure what a good batch size is; the longer we wait between runs, the higher the % of records with
+  # visited = true. If we have to traverse many of them to find 100 records with visited = false, thats a massive
+  # set we have to update the state of. It may actually be faster to not batch!
   count_to_evict = 100
 
   evictions = eviction_scope(pointer.id).where(id: start.id..).limit(count_to_evict).pluck(:id)
