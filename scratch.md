@@ -15,37 +15,39 @@ The algorithm progresses from tail to head, before resetting back to the tail wh
 
 ```ruby
 
-start = Entry.where(eviction_pointer: true).lock.first
-count_to_evict = 100
+Entry.transaction do
+  start = Entry.where(eviction_pointer: true).lock.first
+  count_to_evict = 100
 
-if start
-  # Clear pointer, it will be set on the next entry later
-  start.update(eviction_pointer: false)
-else
-  # First ever eviction fallback
-  start = Entry.order(:id).first
+  if start
+    # Clear pointer, it will be set on the next entry later
+    start.update(eviction_pointer: false)
+  else
+    # First ever eviction fallback
+    start = Entry.order(:id).first
+  end
+
+  evictions = Entry.where(visited: false, id: start.id..).order(:id).first(count_to_evict)
+
+  if evictions.any?
+    clear_visited_status(start.id..evictions.last.id)
+  else
+    # All newer Entry records were visited, so we need to start again from the very oldest
+    # Before we do that, mark all passed over visited Entrys as unvisited
+    clear_visited_status(start.id..)
+
+    # Now, we will definitely find unvisited Entrys, since we just set a bunch to unvisited
+    evictions = Entry.where(visited: false).order(:id).first(count_to_evict)
+    # Again, mark all passed over visited Entrys as unvisited
+    clear_visited_status(..evictions.last.id)
+  end
+
+  # Set the pointer to the first Entry we have not processed yet
+  Entry.where(id: evictions.last.id..).limit(1).order(:id).update_all(eviction_pointer: true)
+
+  # Evict our found candidates!
+  evictions.delete_all
 end
-
-evictions = Entry.where(visited: false, id: start.id..).order(:id).first(count_to_evict)
-
-if evictions.any?
-  clear_visited_status(start.id..evictions.last.id)
-else
-  # All newer Entry records were visited, so we need to start again from the very oldest
-  # Before we do that, mark all passed over visited Entrys as unvisited
-  clear_visited_status(start.id..)
-
-  # Now, we will definitely find unvisited Entrys, since we just set a bunch to unvisited
-  evictions = Entry.where(visited: false).order(:id).first(count_to_evict)
-  # Again, mark all passed over visited Entrys as unvisited
-  clear_visited_status(..evictions.last.id)
-end
-
-# Set the pointer to the first Entry we have not processed yet
-Entry.where(id: evictions.last.id..).limit(1).order(:id).update_all(eviction_pointer: true)
-
-# Evict our found candidates!
-evictions.delete_all
 
 
 def clear_visited_status(id_range)
