@@ -11,7 +11,7 @@ ID:  1     2      3     4     5
 
 The algorithm progresses from tail to head, before resetting back to the tail when it runs out of newer entries.
 
-### The SIEVE algorithm in SolidCache
+## The SIEVE algorithm in SolidCache
 
 ```ruby
 
@@ -56,7 +56,7 @@ end
 ```
 
 
-### When to trigger the expiration algorithm
+## When to trigger the expiration algorithm
 
 Since this algorithm will regularly delete items from the middle of the table, we do actually need to count the table
 entries to know when an eviction is needed.
@@ -86,3 +86,10 @@ but a lock prevents it, it can only mean a couple of things:
 2. An eviction cycle is passing over this entry, which means it is unlikely to be considered for eviction again for some
    time, reducing the impact of us failing to mark it as `visited`
 
+## Ideas
+
+Only one row in the entries table can be `eviction_pointer = true`, so this state should probably be stored as a foreign
+key, rather than a boolean on all rows which needs to be indexed despite us only ever caring about one row (at least for
+MySQL without partial indexes).
+
+I suppose we could store this pointer in the cache entries table itself, and special case it to never be expired.
