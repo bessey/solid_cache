@@ -7,8 +7,8 @@ git_source(:github) { |repo| "https://github.com/#{repo}.git" }
 gemspec
 
 gem "sqlite3"
-gem "mysql2"
-gem "pg"
+# gem "mysql2"
+# gem "pg"
 
 gem "sprockets-rails"
 
